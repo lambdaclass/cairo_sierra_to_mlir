@@ -10,7 +10,7 @@ use cairo_native::{
     starknet_stub::StubSyscallHandler,
 };
 use clap::{Parser, ValueEnum};
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use utils::{find_function, result_to_runresult};
 
@@ -48,6 +48,10 @@ struct Args {
     #[cfg(feature = "with-trace-dump")]
     #[arg(long)]
     trace_output: Option<PathBuf>,
+
+    #[cfg(feature = "with-trace-dump")]
+    #[arg(long)]
+    sierra_output: Option<PathBuf>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -73,6 +77,13 @@ fn main() -> anyhow::Result<()> {
     )?
     .program;
 
+    #[cfg(feature = "with-trace-dump")]
+    if let Some(sierra_output) = args.sierra_output {
+        use std::io::Write;
+        let mut file = File::create(sierra_output).unwrap();
+        write!(file, "{}", &sierra_program).unwrap();
+    }
+
     let native_context = NativeContext::new();
 
     // Compile the sierra program into a MLIR module.
@@ -84,6 +95,16 @@ fn main() -> anyhow::Result<()> {
         RunMode::Aot => {
             let executor =
                 AotNativeExecutor::from_native_module(native_module, args.opt_level.into())?;
+
+            #[cfg(feature = "with-trace-dump")]
+            {
+                use cairo_native::metadata::trace_dump::TraceBinding;
+                if let Some(trace_id) = executor.find_symbol_ptr(TraceBinding::TraceId.symbol()) {
+                    let trace_id = trace_id.cast::<u64>();
+                    unsafe { *trace_id = 0 };
+                }
+            }
+
             Box::new(move |function_id, args, gas, syscall_handler| {
                 executor.invoke_dynamic_with_syscall_handler(
                     function_id,
@@ -96,6 +117,16 @@ fn main() -> anyhow::Result<()> {
         RunMode::Jit => {
             let executor =
                 JitNativeExecutor::from_native_module(native_module, args.opt_level.into())?;
+
+            #[cfg(feature = "with-trace-dump")]
+            {
+                use cairo_native::metadata::trace_dump::TraceBinding;
+                if let Some(trace_id) = executor.find_symbol_ptr(TraceBinding::TraceId.symbol()) {
+                    let trace_id = trace_id.cast::<u64>();
+                    unsafe { *trace_id = 0 };
+                }
+            }
+
             Box::new(move |function_id, args, gas, syscall_handler| {
                 executor.invoke_dynamic_with_syscall_handler(
                     function_id,
@@ -159,12 +190,6 @@ fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "with-trace-dump")]
     if let Some(trace_output) = args.trace_output {
-        assert_eq!(
-            args.run_mode,
-            RunMode::Jit,
-            "AOT trace dump for programs is not yet supported"
-        );
-
         let traces = cairo_native_runtime::trace_dump::TRACE_DUMP.lock().unwrap();
         assert_eq!(traces.len(), 1);
 
